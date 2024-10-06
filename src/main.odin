@@ -1,21 +1,12 @@
 package main
 
-import "core:runtime"
-// import "core:fmt"
-import "core:mem"
+import "base:runtime"
+import "core:fmt"
 import "core:math/rand"
-// import rl "vendor:raylib"
+import "core:mem"
 import rl "raylib"
 
 foreign import "odin_env"
-
-// @(default_calling_convention="c")
-// foreign odin_env {
-//     @(link_name="wasm_testing")
-//     wasm_testing :: proc() ---
-// }
-
-camera: rl.Camera3D
 
 ctx: runtime.Context
 
@@ -29,71 +20,158 @@ timer: f32
 cubePos: [32]rl.Vector3
 cubeColors: [32]rl.Color
 
-@(export, link_name="_main")
-_main :: proc "c" () {
-    ctx = runtime.default_context()
-    context = ctx
+GAME_TITLE :: "A SPACE GAME"
+SCREEN_SIZE :: 800
+PROJECTILE_SPEED :: 1.2
+PLAYER_SIZE :: 50
+SHOT_SIZE :: 15
+SCORE_INCREMENT :: 10
 
-    mem.arena_init(&mainMemoryArena, mainMemoryData[:])
-    mem.arena_init(&tempAllocatorArena, tempAllocatorData[:])
+score: i32 = 0
+colliding := false
+shots: [dynamic]Shot = make([dynamic]Shot, 0, 64)
+target_is_alive := true
+player_has_moved := false
+player_position: rl.Vector2
+target_position: rl.Vector2
+first_run := true
 
-    ctx.allocator      = mem.arena_allocator(&mainMemoryArena)
-    ctx.temp_allocator = mem.arena_allocator(&tempAllocatorArena)
-
-    camera.position = {3, 3, 3}
-    camera.target = {0,0,0}
-    camera.up = {0, 1, 0}
-    camera.fovy = 80
-    camera.projection = .PERSPECTIVE
-
-    rl.InitWindow(800, 600, "test")
-    rl.SetTargetFPS(60)
-
-    // wasm_testing()
+Shot :: struct {
+	position:   rl.Vector2,
+	direction:  rl.Vector2,
+	time_fired: f64,
 }
 
-@(export, link_name="step")
+@(export, link_name = "_main")
+_main :: proc "c" () {
+	ctx = runtime.default_context()
+	context = ctx
+
+	mem.arena_init(&mainMemoryArena, mainMemoryData[:])
+	mem.arena_init(&tempAllocatorArena, tempAllocatorData[:])
+
+	ctx.allocator = mem.arena_allocator(&mainMemoryArena)
+	ctx.temp_allocator = mem.arena_allocator(&tempAllocatorArena)
+
+	rl.InitWindow(SCREEN_SIZE, SCREEN_SIZE, GAME_TITLE)
+	rl.SetTargetFPS(60)
+
+}
+
+@(export, link_name = "step")
 step :: proc "contextless" () {
-    context = ctx
-    update()
+	context = ctx
+	update()
 }
 
 update :: proc() {
-    free_all(context.temp_allocator)
+	dt := rl.GetFrameTime() // Get actual delta time for each frame
+	initial_player_position := rl.Vector2 {
+		f32(rl.GetScreenWidth() / 2),
+		f32(rl.GetScreenHeight() / 2),
+	}
+	initial_target_position := rl.Vector2{f32(rl.GetScreenWidth() / 2), 100}
 
-    timer -= rl.GetFrameTime()
-    if timer <= 0 {
-        timer = 1
+	camera_zoom := f32(rl.GetScreenHeight() / SCREEN_SIZE)
+	if (first_run) {
+		target_position = initial_target_position
+		first_run = false
+	}
 
-        for c in &cubePos {
-            c.x = rand.float32_range(-10, 10)
-            c.y = rand.float32_range(-10, 10)
-            c.z = rand.float32_range(-10, 10)
-        }
+	if (!player_has_moved) {
+		player_position = initial_player_position
+	}
 
-        for &c in &cubeColors {
-            c = rl.Color {
-                u8(rand.uint32()),
-                u8(rand.uint32()),
-                u8(rand.uint32()),
-                255,
-            }
+	// Clear the background at the start of drawing
+	rl.BeginDrawing()
+	rl.ClearBackground(rl.BLUE)
 
-        }
-    }
+	// Camera settings
+	camera := rl.Camera2D {
+		// target = rl.Vector2{player_position[0], player_position[1]}, // Camera target follows the player
+		// offset = rl.Vector2{f32(rl.GetScreenWidth()) / 2, f32(rl.GetScreenHeight()) / 2}, // Center the camera on the player
+		zoom = camera_zoom,
+	}
+	//rl.BeginMode2D(camera)
 
-    rl.BeginDrawing()
-    defer rl.EndDrawing()
+	// Handle player movement
+	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
+		player_position[0] = player_position[0] - f32(300) * dt
+		player_has_moved = true
+	}
 
-    rl.UpdateCamera(&camera, .ORBITAL)
+	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
+		player_position[0] += f32(300) * dt
+		player_has_moved = true
+	}
 
-    rl.ClearBackground(rl.RAYWHITE)
-    rl.BeginMode3D(camera)
-    {
-        for i in 0..<32 {
-            rl.DrawCube(cubePos[i], 1, 1, 1, cubeColors[i])
-        }
-        rl.DrawGrid(10, 1)
-    }
-    rl.EndMode3D()
+	rl.DrawCircleV(player_position, PLAYER_SIZE, rl.RED)
+
+	// Draw the score text
+	rl.DrawText(rl.TextFormat("Score: %d", score), 20, 20, 40, rl.WHITE)
+	// Draw player as a red circle
+
+	// Draw target rectangle
+	if (target_is_alive) {
+		rl.DrawRectangleV(target_position, rl.Vector2{300, 30}, rl.YELLOW)
+	}
+
+	// Fire projectiles when SPACE is pressed
+	if rl.IsKeyDown(.SPACE) || rl.IsKeyDown(.W) {
+		// Calculate direction relative to the player position
+		dir := rl.Vector2 {
+			rl.GetMousePosition()[0] - player_position[0],
+			rl.GetMousePosition()[1] - player_position[1],
+		}
+
+		// Normalize the direction vector
+		//dir = rl.Vector2Normalize(dir)
+
+		// Make a copy of the player position to use for the projectile's starting position
+		start_pos := rl.Vector2{player_position[0], player_position[1]}
+
+		// Add a new projectile to the shots array if the last shot is older than 0.4 seconds
+		if len(shots) == 0 || rl.GetTime() - shots[len(shots) - 1].time_fired > 0.4 {
+			append(&shots, Shot{position = start_pos, direction = dir, time_fired = rl.GetTime()})
+		}
+	}
+
+	// Update and draw each projectile
+	for &shot in shots {
+		// Update projectile position based on direction, speed, and delta time
+		shot.position = rl.Vector2 {
+			shot.position[0] + shot.direction[0] * PROJECTILE_SPEED * dt,
+			shot.position[1] + shot.direction[1] * PROJECTILE_SPEED * dt,
+		}
+		// check if shot is colliding with target if target is alive
+
+		if (target_is_alive) {
+			colliding = rl.CheckCollisionCircleRec(
+				shot.position,
+				SHOT_SIZE,
+				rl.Rectangle{target_position[0], target_position[1], 300, 30},
+			)
+		} else {
+			colliding = false
+		}
+		// remove the shot if it is colliding with the target, destroy the target
+		if colliding {
+			score += SCORE_INCREMENT
+			target_is_alive = false
+		}
+
+		rl.DrawCircleV(shot.position, SHOT_SIZE, rl.GREEN)
+	}
+
+	//target reappears after .5 seconds
+	if !target_is_alive && rl.GetTime() - shots[len(shots) - 1].time_fired > 0.5 {
+		target_is_alive = true
+		target_position = rl.Vector2 {
+			f32(rand.int31() % SCREEN_SIZE),
+			f32(rand.int31() % SCREEN_SIZE),
+		}
+	}
+
+	rl.EndMode2D()
+	rl.EndDrawing()
 }
